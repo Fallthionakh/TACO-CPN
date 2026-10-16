@@ -1846,6 +1846,11 @@ function bindParametres(){
 /* Gestion des accès TACO-CPN — registres privés, Spark */
 const ADMIN_UID = "HO5W8K0gHle7v3lcAp4dwzAyJPl2";
 const ADMIN_EMAIL = "abdoulaye.fall407@gmail.com";
+function accessFingerprint(profile){
+  if(!profile) return "absent";
+  return JSON.stringify({role:profile.role||"",actif:profile.actif===true,
+    contributeurs:[...new Set(profile.contributeurs||[])].sort()});
+}
 const Access = {
   fs:null, profile:null, users:[], owner:null, options:[], authUnsub:null, profileUnsub:null,
   isAdmin(){ return S.uid === ADMIN_UID; },
@@ -1892,11 +1897,11 @@ const Access = {
     this.owner=this.options.some(o=>o.uid===requested)?requested:(this.options[0]?.uid||null);
     S.canWrite=this.isAdmin()||this.profile.role==="contributeur";
     if(!this.owner){ this.block("Aucun contributeur ne vous est attribué. Contactez l’administrateur."); return null; }
-    const original=JSON.stringify(this.profile);
+    const original=accessFingerprint(this.profile);
     if(!this.isAdmin()) this.profileUnsub=this.fs.doc("utilisateurs/"+S.uid).onSnapshot(d=>{
-      if(JSON.stringify(d.exists?d.data():null)!==original) location.reload();
+      if(accessFingerprint(d.exists?d.data():null)!==original) this.block("Vos droits ont changé. Cliquez sur Actualiser pour ouvrir votre nouvel accès.");
     },()=>this.block("Votre accès a été interrompu. Reconnectez-vous."));
-    this.authUnsub=firebase.auth().onAuthStateChanged(u=>{ if(!u||u.uid!==S.uid) location.reload(); });
+    this.authUnsub=firebase.auth().onAuthStateChanged(u=>{ if(!u||u.uid!==S.uid) this.block("Votre session a changé. Cliquez sur Actualiser pour vous reconnecter."); });
     const nav=document.querySelector("nav");
     if(this.isAdmin() && !$("#usersNav")){
       const b=document.createElement("button"); b.id="usersNav"; b.className="navlink"; b.dataset.view="utilisateurs"; b.textContent="Utilisateurs et droits"; b.onclick=()=>go("utilisateurs"); nav.appendChild(b);
@@ -1916,7 +1921,8 @@ const Access = {
   block(message){
     S.loginPending=true; S.canWrite=false; S.canAdmin=false; S.recs=[]; S.pats=[];
     Store.unsub.forEach(u=>u());
-    $("#main").innerHTML=`<div class="panel"><h1>Accès au registre</h1><p>${esc(message)}</p><button class="btn" id="blockedOut">Se déconnecter</button></div>`;
+    $("#main").innerHTML=`<div class="panel"><h1>Accès au registre</h1><p>${esc(message)}</p><button class="btn primary" id="blockedRefresh">Actualiser</button> <button class="btn" id="blockedOut">Se déconnecter</button></div>`;
+    $("#blockedRefresh").onclick=()=>location.reload();
     $("#blockedOut").onclick=()=>firebase.auth().signOut().then(()=>location.reload());
   },
   async saveUser(event){
