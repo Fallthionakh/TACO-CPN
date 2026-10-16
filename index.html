@@ -683,7 +683,7 @@ const TACO_CONFIG = {
     messagingSenderId: "436298049513",
     appId: "1:436298049513:web:319df31f8a954d1531cd78"
   },
-  admins: []
+  admins: ["abdoulaye.fall407@gmail.com"]
 };
 </script>
 <script>
@@ -1106,7 +1106,7 @@ const Store = {
         parts[i] = s.docs.map(d=>({id:d.id, ...d.data()}));
         S.recsCapped = parts.some(p=>p && p.length>=1000);
         if (parts.every(Boolean)){ S.recs = parts.flat(); S.recsReady = true; render(true); }
-      }, ()=>toast("Le registre n'a pas pu être chargé. Rechargez la page.", true)));
+      }, ()=>{ S.recs=[]; S.recsReady=false; Access.block("Ce registre n’est plus accessible ou son chargement a échoué. Vérifiez vos droits et votre connexion."); }));
     });
   },
   refreshLocal(){ if (!this.db && S.range){ const {start,end} = S.range; S.range = null; this.watch(start,end); } },
@@ -1166,7 +1166,7 @@ const patName = p => p ? [p.nom, p.prenom].filter(Boolean).join(" ") : "";
 function paintStructure(){ $("#brandStructure").textContent = S.structure || "Registre de santé maternelle"; }
 
 /* ================= Navigation ================= */
-const VIEWS = ["saisie","liste","rapport","patientes","parametres"];
+const VIEWS = ["saisie","liste","rapport","patientes","parametres","utilisateurs"];
 function watchPeriod(){ const r = periodRange(S.P); if (!r.error) Store.watch(r.start, r.end); }
 function go(view){
   if (view==="jour" || view==="mois") view = "rapport";
@@ -1196,7 +1196,7 @@ function render(fromData){
   const banner = S.mode==="local"
     ? `<div class="banner" role="note">Mode hors registre : les saisies de cette session ne sont pas conservées. Ouvrez la page connecté·e à votre compte pour utiliser le registre partagé.</div>`
     : (!canWrite() && S.mode==="db") ? `<div class="banner" role="note">Accès en lecture seule : vous pouvez consulter et exporter les rapports, mais pas saisir.</div>` : "";
-  const v = {saisie:[viewSaisie,bindSaisie], liste:[viewListe,bindListe], rapport:[viewRapport,bindReport], patientes:[viewPatientes,bindPatientes], parametres:[viewParametres,bindParametres]}[S.view];
+  const v = {saisie:[viewSaisie,bindSaisie], liste:[viewListe,bindListe], rapport:[viewRapport,bindReport], patientes:[viewPatientes,bindPatientes], parametres:[viewParametres,bindParametres], utilisateurs:[viewUsers,bindUsers]}[S.view];
   m.innerHTML = banner + v[0](); v[1]();
 }
 
@@ -1779,7 +1779,7 @@ function bindPatientes(){
 
 /* ================= Paramètres ================= */
 function viewParametres(){
-  const admin = S.canAdmin && S.mode!=="loading";
+  const admin = canWrite();
   return `<div class="pagehead"><div><div class="eyebrow">Structure</div><h1>Paramètres</h1></div></div>
   <div style="display:grid;gap:18px;max-width:720px">
     <form class="panel" id="stForm" style="display:grid;gap:12px">
@@ -1802,8 +1802,8 @@ function viewParametres(){
     </section>
     <section class="panel" style="display:grid;gap:10px">
       <h2 class="h2">Droits</h2>
-      <p class="note">Contributeurs : saisir, modifier, supprimer leurs propres saisies. Éditeurs et propriétaire : supprimer toute saisie et renseigner la structure. Lecteurs : consulter et exporter les rapports.</p>
-      <p class="note">Votre accès : <b>${S.mode==="local"?"session locale (non conservée)":!canWrite()?"lecture seule":S.canAdmin?"éditeur":"contributeur"}</b></p>
+      <p class="note">Contributeurs : saisir, modifier, supprimer leurs propres saisies. Chaque contributeur dispose de son registre privé et de sa structure. Les lecteurs consultent et exportent les rapports des registres qui leur sont attribués. L’administrateur gère les droits et peut sélectionner tous les registres.</p>
+      <p class="note">Votre accès : <b>${S.mode==="local"?"session locale (non conservée)":!canWrite()?"lecture seule":S.canAdmin?"administrateur":"contributeur"}</b></p>
     </section>
   </div>`;
 }
@@ -1843,12 +1843,144 @@ function bindParametres(){
   f.onsubmit = async e=>{ e.preventDefault(); try{ await Store.saveStructure($("#stNom").value.trim()); toast("Nom de la structure enregistré."); }catch(err){ writeError(err); } };
 }
 
+/* Gestion des accès TACO-CPN — registres privés, Spark */
+const ADMIN_UID = "HO5W8K0gHle7v3lcAp4dwzAyJPl2";
+const ADMIN_EMAIL = "abdoulaye.fall407@gmail.com";
+const Access = {
+  fs:null, profile:null, users:[], owner:null, options:[], authUnsub:null, profileUnsub:null,
+  isAdmin(){ return S.uid === ADMIN_UID; },
+  scopedDb(owner){
+    // Le registre historique de l'administrateur reste au même emplacement.
+    const prefix = owner === ADMIN_UID ? "" : `registres/${owner}/`;
+    return {collection:n=>this.fs.collection(prefix+n), doc:p=>this.fs.doc(prefix+p)};
+  },
+  async loadOptions(){
+    if(this.isAdmin()) {
+      const snap = await this.fs.collection("utilisateurs").get();
+      this.users = snap.docs.map(d=>({...d.data(),uid:d.id}));
+      this.options = [{uid:ADMIN_UID,nom:"Mon registre administrateur"}, ...this.users.filter(u=>u.role==="contributeur" || u.aUnRegistre===true)];
+    } else if(this.profile.role==="contributeur") {
+      this.options = [{uid:S.uid,nom:this.profile.nom||this.profile.email||"Mon registre"}];
+    } else {
+      const ids = [...new Set(this.profile.contributeurs||[])];
+      const snaps = await Promise.all(ids.map(id=>this.fs.doc("utilisateurs/"+id).get()));
+      this.options = snaps.filter(d=>d.exists && d.data().actif && d.data().role==="contributeur").map(d=>({...d.data(),uid:d.id}));
+    }
+  },
+  async connect(){
+    S.canAdmin=false; S.canWrite=false; S.backend="firebase";
+    if(!TACO_CONFIG.firebase) throw new Error("Configuration Firebase absente.");
+    await loadFirebase();
+    if(!firebase.apps.length) firebase.initializeApp(TACO_CONFIG.firebase);
+    // Pas de cache Firestore persistant partagé entre les comptes sur cet appareil.
+    this.fs = firebase.firestore();
+    const user = await new Promise(resolve=>{
+      let off = firebase.auth().onAuthStateChanged(u=>{
+        if(u){ S.loginPending=false; setTimeout(()=>off(),0); resolve(u); }
+        else showLogin();
+      });
+    });
+    S.uid=user.uid;
+    this.profile=this.isAdmin()?{role:"admin",actif:true,email:ADMIN_EMAIL,nom:"Administrateur"}:null;
+    if(!this.profile){ const d=await this.fs.doc("utilisateurs/"+S.uid).get(); this.profile=d.exists?d.data():null; }
+    if(!this.profile || !this.profile.actif || !["admin","contributeur","lecteur"].includes(this.profile.role)) {
+      this.block("Votre compte n’a pas encore d’accès actif. Contactez l’administrateur."); return null;
+    }
+    S.canAdmin=this.isAdmin();
+    await this.loadOptions();
+    const requested=sessionStorage.getItem("taco-owner-"+S.uid);
+    this.owner=this.options.some(o=>o.uid===requested)?requested:(this.options[0]?.uid||null);
+    S.canWrite=this.isAdmin()||this.profile.role==="contributeur";
+    if(!this.owner){ this.block("Aucun contributeur ne vous est attribué. Contactez l’administrateur."); return null; }
+    const original=JSON.stringify(this.profile);
+    if(!this.isAdmin()) this.profileUnsub=this.fs.doc("utilisateurs/"+S.uid).onSnapshot(d=>{
+      if(JSON.stringify(d.exists?d.data():null)!==original) location.reload();
+    },()=>this.block("Votre accès a été interrompu. Reconnectez-vous."));
+    this.authUnsub=firebase.auth().onAuthStateChanged(u=>{ if(!u||u.uid!==S.uid) location.reload(); });
+    const nav=document.querySelector("nav");
+    if(this.isAdmin() && !$("#usersNav")){
+      const b=document.createElement("button"); b.id="usersNav"; b.className="navlink"; b.dataset.view="utilisateurs"; b.textContent="Utilisateurs et droits"; b.onclick=()=>go("utilisateurs"); nav.appendChild(b);
+    }
+    if(this.profile.role==="lecteur"){
+      document.querySelectorAll(".navlink").forEach(b=>{b.hidden=b.dataset.view!=="rapport"; b.style.display=b.hidden?"none":"";});
+      S.view="rapport"; const period=periodRange(S.P); if(!period.error) S.range=period;
+    }
+    this.paintWho(user.email);
+    return this.scopedDb(this.owner);
+  },
+  paintWho(email){
+    $("#who").innerHTML=`<strong>${esc(email||"")}</strong><br>${esc(this.profile.role)}<br><label for="accessOwner">Registre consulté</label><select id="accessOwner" style="width:100%;margin:8px 0">${this.options.map(o=>`<option value="${esc(o.uid)}" ${o.uid===this.owner?"selected":""}>${esc(o.nom||o.email||o.uid)}</option>`).join("")}</select><button type="button" class="btn sm" id="accessLogout">Se déconnecter</button>`;
+    $("#accessOwner").onchange=e=>{sessionStorage.setItem("taco-owner-"+S.uid,e.target.value);location.reload();};
+    $("#accessLogout").onclick=()=>firebase.auth().signOut().then(()=>location.reload());
+  },
+  block(message){
+    S.loginPending=true; S.canWrite=false; S.canAdmin=false; S.recs=[]; S.pats=[];
+    Store.unsub.forEach(u=>u());
+    $("#main").innerHTML=`<div class="panel"><h1>Accès au registre</h1><p>${esc(message)}</p><button class="btn" id="blockedOut">Se déconnecter</button></div>`;
+    $("#blockedOut").onclick=()=>firebase.auth().signOut().then(()=>location.reload());
+  },
+  async saveUser(event){
+    event.preventDefault(); const b=$("#userSave");b.disabled=true;
+    try{
+      const uid=$("#userUid").value.trim(), email=$("#userEmail").value.trim().toLowerCase(), nom=$("#userNom").value.trim(), role=$("#userRole").value;
+      if(!/^[A-Za-z0-9_-]{1,128}$/.test(uid)||uid===ADMIN_UID) throw new Error("Copiez l’UID du nouveau compte Firebase. Le compte administrateur est protégé.");
+      if(!nom||!email.includes("@")) throw new Error("Renseignez le nom et l’adresse e-mail.");
+      const existing=this.users.find(u=>u.uid===uid);
+      if(existing && existing.role!==role && existing.role==="contributeur" && !confirm("Changer ce rôle retire son accès en saisie à son registre. Ses données sont conservées. Continuer ?")) return;
+      const contributeurs=role==="lecteur"?[...document.querySelectorAll("[name=assigned]:checked")].map(e=>e.value):[];
+      await this.fs.doc("utilisateurs/"+uid).set({nom,email,role,actif:$("#userActive").checked,contributeurs,aUnRegistre:role==="contributeur" || !!existing?.aUnRegistre || existing?.role==="contributeur",modifieLe:new Date().toISOString()});
+      await this.loadOptions(); this.paintWho(firebase.auth().currentUser.email); render(); toast("Droits enregistrés. L’utilisateur peut se connecter.");
+    }catch(e){toast(e.message||"Enregistrement des droits impossible.",true);}finally{if($("#userSave"))$("#userSave").disabled=false;}
+  },
+  editUser(uid){
+    const u=this.users.find(x=>x.uid===uid); if(!u)return;
+    $("#userUid").value=u.uid;$("#userUid").readOnly=true;$("#userEmail").value=u.email||"";$("#userNom").value=u.nom||"";$("#userRole").value=u.role;$("#userActive").checked=!!u.actif;
+    document.querySelectorAll("[name=assigned]").forEach(e=>e.checked=(u.contributeurs||[]).includes(e.value));
+    $("#assignedBox").hidden=u.role!=="lecteur";$("#userNom").focus();
+  }
+};
+Store.connect=async function(){
+  S.downloads={save:async({filename,data})=>{
+    const blob=data instanceof Blob?data:new Blob([data]);const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);return{status:"saved"};
+  }};
+  return Access.connect();
+};
+function viewUsers(){
+  if(!Access.isAdmin()) return `<div class="empty">Accès réservé à l’administrateur.</div>`;
+  const contributors=Access.users.filter(u=>u.role==="contributeur"&&u.actif);
+  return `<div class="pagehead"><div><h1>Utilisateurs et droits</h1><p>Administrateur : ${esc(ADMIN_EMAIL)}</p></div></div>
+  <section class="panel" style="margin-bottom:20px"><h2>1. Créer le compte de connexion</h2><p>Dans <a href="https://console.firebase.google.com/project/taco-cpn/authentication/users" target="_blank" rel="noopener">Firebase → Authentication → Utilisateurs</a>, ajoutez l’utilisateur avec son e-mail et un mot de passe personnel. Copiez son UID. Revenez ensuite compléter les droits ci-dessous.</p><p>Vous pouvez aussi désactiver le compte ou réinitialiser son mot de passe depuis Firebase. Aucun mot de passe n’est conservé dans cette page.</p></section>
+  <form class="panel" id="rightsForm" style="margin-bottom:20px"><h2>2. Attribuer les droits</h2><div class="formgrid">
+  <div class="field"><label for="userUid">UID copié depuis Firebase</label><input id="userUid" required maxlength="128"></div>
+  <div class="field"><label for="userNom">Nom de l’utilisateur</label><input id="userNom" required></div>
+  <div class="field"><label for="userEmail">Adresse e-mail</label><input id="userEmail" type="email" required></div>
+  <div class="field"><label for="userRole">Rôle</label><select id="userRole"><option value="contributeur">Contributeur</option><option value="lecteur">Lecteur</option></select></div>
+  <div class="field"><label><input id="userActive" type="checkbox" checked> Accès actif</label></div></div>
+  <fieldset id="assignedBox" hidden style="margin:20px 0"><legend>Contributeurs accessibles à ce lecteur</legend>${contributors.length?contributors.map(u=>`<label style="display:block;margin:10px"><input type="checkbox" name="assigned" value="${esc(u.uid)}"> ${esc(u.nom||u.email)}</label>`).join(""):"Créez d’abord les droits d’un contributeur."}</fieldset>
+  <div class="actions"><button class="btn primary" id="userSave" type="submit">Enregistrer les droits</button><button class="btn" id="userNew" type="button">Nouveau / Effacer le formulaire</button></div></form>
+  <section class="panel"><h2>Comptes autorisés</h2><p>Décochez « Accès actif » pour suspendre un utilisateur sans effacer ses données. Les lecteurs choisissent un registre attribué à la fois ; les rapports et exports concernent ce registre.</p>
+  <div style="overflow:auto"><table><thead><tr><th>Nom</th><th>E-mail</th><th>Rôle</th><th>Accès</th><th>Contributeurs attribués</th><th></th></tr></thead><tbody>${Access.users.map(u=>`<tr><td>${esc(u.nom)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${u.actif?"Actif":"Suspendu"}</td><td>${(u.contributeurs||[]).map(id=>esc(Access.users.find(c=>c.uid===id)?.nom||id)).join(", ")||"—"}</td><td><button class="btn sm" data-user="${esc(u.uid)}">Modifier</button></td></tr>`).join("")||'<tr><td colspan="6">Aucun utilisateur configuré.</td></tr>'}</tbody></table></div></section>`;
+}
+function bindUsers(){
+  if(!Access.isAdmin())return;
+  $("#rightsForm").onsubmit=e=>Access.saveUser(e);
+  $("#userRole").onchange=e=>$("#assignedBox").hidden=e.target.value!=="lecteur";
+  $("#userNew").onclick=()=>render();
+  document.querySelectorAll("[data-user]").forEach(b=>b.onclick=()=>Access.editUser(b.dataset.user));
+}
+const originalGo=go;
+go=function(view){
+  if(view==="utilisateurs"&&!Access.isAdmin())view="rapport";
+  if(Access.profile?.role==="lecteur" && view!=="rapport")view="rapport";
+  return originalGo(view);
+};
+
 /* ================= Démarrage ================= */
 (function start(){
   const h = (location.hash||"").slice(1);
   go(h || "saisie");
   window.addEventListener("hashchange", ()=>{ const v = (location.hash||"").slice(1); if (v && v !== S.view) go(v); });
-  Store.init().then(()=>render());
+  Store.init().then(()=>render()).catch(e=>{ console.error(e); Access.block("Impossible d’ouvrir le registre. Vérifiez votre connexion et les règles Firestore, puis rechargez la page."); });
 })();
 </script>
 
