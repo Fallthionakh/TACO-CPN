@@ -675,11 +675,17 @@ table.daily tr.total td,table.daily tr.total th{font-weight:700;background:var(-
    les saisies des autres (liste vide = tout le monde).
    ===================================================================== */
 const TACO_CONFIG = {
-  firebase: null,
+  firebase: {
+    apiKey: "AIzaSyCVcg5owDYNNMzETcClvJkEIDIV7Xjmc_4",
+    authDomain: "taco-cpn.firebaseapp.com",
+    projectId: "taco-cpn",
+    storageBucket: "taco-cpn.firebasestorage.app",
+    messagingSenderId: "436298049513",
+    appId: "1:436298049513:web:319df31f8a954d1531cd78"
+  },
   admins: []
 };
 </script>
-<script>
 /* ---------- Base locale (IndexedDB), même interface que la base en ligne ---------- */
 const LocalDB = {
   docs: new Map(), listeners: new Set(), idb: null, pending: false,
